@@ -421,3 +421,41 @@ describe('VerifyView – portable proof manifest loading', () => {
     })
   })
 })
+
+describe('VerifyView – stale selection revision guard', () => {
+  it('ignores a late manifest parse after the user enters a newer video hash', async () => {
+    const { verification } = renderView()
+
+    let resolveLateText!: (value: string) => void
+    const lateManifestFile = new File(['{}'], 'late-manifest.json', { type: 'application/json' })
+    Object.defineProperty(lateManifestFile, 'text', {
+      value: () => new Promise<string>((resolve) => {
+        resolveLateText = resolve
+      }),
+    })
+
+    const manifestInput = screen.getByLabelText(/drop or choose a proof manifest json/i) as HTMLInputElement
+    fireEvent.change(manifestInput, { target: { files: [lateManifestFile] } })
+
+    const newerHash = 'e'.repeat(64)
+    const videoHashInput = screen.getByLabelText(/video hash/i) as HTMLInputElement
+    fireEvent.change(videoHashInput, { target: { value: newerHash } })
+
+    // Resolve the stale manifest late
+    resolveLateText(JSON.stringify({
+      protocol: 'harpocrates',
+      version: 2,
+      proofId: '0x' + 'a'.repeat(64),
+      tier: 'silent',
+      videoHash: '1'.repeat(64),
+      metadataHash: '2'.repeat(64),
+      network: 'Test SDF Future Network ; October 2022',
+      contractId: 'CTEST',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(videoHashInput.value).toBe(newerHash)
+    expect(verification.loadSharedVerification).not.toHaveBeenCalled()
+  })
+})

@@ -19,6 +19,46 @@ export type VerificationResult = {
   hasHarpocratesMetadata: boolean
   events: ProofEvent[]
   onChain: ChainProofRecord | null
+  /** Request revision that produced this result, when bound by the caller. */
+  revision?: number
+}
+
+export type VerificationFlowOptions = {
+  signal?: AbortSignal
+  sourceAddress?: string
+  /** Monotonically increasing request revision used to discard stale results. */
+  revision?: number
+}
+
+export type VerificationRevisionGuard = {
+  /** Advance and return a new monotonically increasing request revision. */
+  next: () => number
+  /** Return the currently active request revision. */
+  current: () => number
+  /** Return true only when `revision` still matches the active request revision. */
+  isCurrent: (revision: number) => boolean
+}
+
+/**
+ * Create a lightweight monotonic revision guard for binding asynchronous
+ * verification results to the latest evidence selection.
+ */
+export function createVerificationRevisionGuard(): VerificationRevisionGuard {
+  let revision = 0
+  return {
+    next: () => {
+      revision += 1
+      return revision
+    },
+    current: () => revision,
+    isCurrent: (candidate: number) => candidate === revision,
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError')
+  }
 }
 
 /**
@@ -29,18 +69,23 @@ export type VerificationResult = {
  */
 export async function runVerificationFlow(
   videoHash: string,
-  options: { signal?: AbortSignal; sourceAddress?: string } = {},
+  options: VerificationFlowOptions = {},
 ): Promise<VerificationResult> {
   const safeHash = assertValidVideoHash(videoHash)
+  throwIfAborted(options.signal)
 
   const events = await fetchProofEventsByVideo(safeHash, options.signal)
+  throwIfAborted(options.signal)
+
   const onChain = await getOnChainProof(safeHash, options.sourceAddress)
+  throwIfAborted(options.signal)
 
   return {
     videoHash: safeHash,
     hasHarpocratesMetadata: events.length > 0,
     events,
-    onChain: onChain,
+    onChain,
+    ...(options.revision !== undefined ? { revision: options.revision } : {}),
   }
 }
 
@@ -51,11 +96,13 @@ export async function runVerificationFlow(
 export async function verifyUploadedVideo(
   file: File,
   videoHash: string,
-  options: { signal?: AbortSignal; sourceAddress?: string } = {},
+  options: VerificationFlowOptions = {},
 ): Promise<VerificationResult> {
   // Validate before hitting the network at all.
   const safeHash = assertValidVideoHash(videoHash)
+  throwIfAborted(options.signal)
   const extract = await extractMetadata(file, options.signal)
+  throwIfAborted(options.signal)
   const result = await runVerificationFlow(safeHash, options)
   return { ...result, hasHarpocratesMetadata: extract.hasHarpocratesMetadata }
 }

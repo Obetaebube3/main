@@ -705,3 +705,137 @@ describe('useVerification – offline mode', () => {
     expect(result.current.verifyResult).not.toContain('witness-secret-x')
   })
 })
+
+// ── request revision & late cancellation guard ────────────────────────────
+
+describe('useVerification – request revision & late cancellation guard', () => {
+  it('ignores late results from a cancelled verifyEvidence request after a newer selection starts', async () => {
+    const vm = await getVerifMock()
+
+    let resolveFirstChain!: (value: unknown) => void
+    const firstChain = new Promise((resolve) => {
+      resolveFirstChain = resolve
+    })
+
+    // First request hangs on on-chain lookup (which does not take AbortSignal)
+    vm.extractMetadata.mockResolvedValueOnce({ hasHarpocratesMetadata: true })
+    vm.fetchProofEventsByVideo.mockResolvedValueOnce([
+      { id: 1, event_type: 'registered', file_name: null, video_hash: 'a'.repeat(64), proof_id: null, tier: null, created_at: '' },
+    ])
+    vm.getOnChainProof.mockReturnValueOnce(firstChain)
+
+    // Second request resolves cleanly as unverified (no metadata, no db, no chain)
+    vm.extractMetadata.mockResolvedValueOnce({ hasHarpocratesMetadata: false })
+    vm.fetchProofEventsByVideo.mockResolvedValueOnce([])
+    vm.getOnChainProof.mockResolvedValueOnce(null)
+
+    const { result } = renderHook(() => useVerification())
+
+    const firstRun = result.current.verifyEvidence(makeVideoFile('first.mp4', 'video/mp4', 4))
+    // Cancel the first request while it is still in flight
+    act(() => {
+      result.current.cancel()
+    })
+    expect(result.current.status).toBe('cancelled')
+
+    // Start and finish a newer selection
+    await act(async () => {
+      await result.current.verifyEvidence(makeVideoFile('second.mp4', 'video/mp4', 8))
+    })
+    expect(result.current.status).toBe('success')
+    expect(result.current.verifyResult).toMatch(/No verification evidence found/i)
+    const newerHash = result.current.verifyHash
+
+    // Now resolve the stale first request late
+    await act(async () => {
+      resolveFirstChain({
+        videoHash: 'a'.repeat(64),
+        metadataHash: 'b'.repeat(64),
+        tier: 1,
+        status: 1,
+        createdAt: '1000',
+        source: null,
+        issuer: null,
+      })
+      await firstRun
+    })
+
+    // Newer selection must remain intact
+    expect(result.current.verifyHash).toBe(newerHash)
+    expect(result.current.status).toBe('success')
+    expect(result.current.chainProof).toBeNull()
+    expect(result.current.verifyResult).toMatch(/No verification evidence found/i)
+  })
+
+  it('ignores late results and late errors from a cancelled loadSharedVerification request', async () => {
+    const vm = await getVerifMock()
+
+    let resolveFirstEvents!: (value: unknown) => void
+    const firstEvents = new Promise((resolve) => {
+      resolveFirstEvents = resolve
+    })
+
+    const hashA = 'a'.repeat(64)
+    const hashB = 'b'.repeat(64)
+
+    vm.fetchProofEventsByVideo.mockReturnValueOnce(firstEvents)
+    vm.getOnChainProof.mockResolvedValueOnce({
+      videoHash: hashA,
+      metadataHash: '1'.repeat(64),
+      tier: 1,
+      status: 1,
+      createdAt: '1000',
+      source: null,
+      issuer: null,
+    })
+
+    vm.fetchProofEventsByVideo.mockResolvedValueOnce([])
+    vm.getOnChainProof.mockResolvedValueOnce(null)
+
+    const { result } = renderHook(() => useVerification())
+
+    const firstShared = result.current.loadSharedVerification({
+      protocol: 'harpocrates-verification-link',
+      version: 1,
+      videoHash: hashA,
+      proofId: '1'.repeat(64),
+      metadataHash: '1'.repeat(64),
+      network: 'Test SDF Network ; September 2015',
+      contractId: 'C123',
+    })
+
+    act(() => {
+      result.current.cancel()
+    })
+    expect(result.current.status).toBe('cancelled')
+
+    await act(async () => {
+      await result.current.loadSharedVerification({
+        protocol: 'harpocrates-verification-link',
+        version: 1,
+        videoHash: hashB,
+        proofId: '2'.repeat(64),
+        metadataHash: '2'.repeat(64),
+        network: 'Test SDF Network ; September 2015',
+        contractId: 'C123',
+      })
+    })
+    expect(result.current.verifyHash).toBe(hashB)
+    expect(result.current.status).toBe('success')
+    expect(result.current.verifyResult).toMatch(/No public verification record/i)
+
+    // Settle the cancelled first shared request late
+    await act(async () => {
+      resolveFirstEvents([
+        { id: 7, event_type: 'registered', file_name: null, video_hash: hashA, proof_id: '1'.repeat(64), tier: 'source', created_at: '' },
+      ])
+      await firstShared
+    })
+
+    // Newer shared selection must remain untouched
+    expect(result.current.verifyHash).toBe(hashB)
+    expect(result.current.events).toHaveLength(0)
+    expect(result.current.chainProof).toBeNull()
+    expect(result.current.verifyResult).toMatch(/No public verification record/i)
+  })
+})
