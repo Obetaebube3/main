@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProofWorkerManager } from './proof-worker-manager'
 import { ProofWorkerLogger } from './proof-worker-logger'
 import type { ProofWorkerResponse } from './proof.worker.types'
+import { PROOF_WORKER_MEMORY_LIMITS } from '../proofWorkerMemory'
 
 /**
  * `ProofWorkerManager` does not spawn a real worker yet: `init` only flips
@@ -342,5 +343,97 @@ describe('destroy', () => {
     expect(() => manager.destroy()).not.toThrow()
     await manager.init()
     expect(internals(manager).isInitialized).toBe(true)
+  })
+})
+
+describe('getResourceAdmission', () => {
+  it('admits multi-threaded proving when isolated with ample memory and idle concurrency', () => {
+    const manager = createManager({ maxMemoryMB: 256 })
+
+    const decision = manager.getResourceAdmission({
+      crossOriginIsolated: true,
+      hardwareConcurrency: 12,
+      deviceMemoryGB: 8,
+    })
+
+    expect(decision.admitted).toBe(true)
+    expect(decision.executionMode).toBe('multi-threaded')
+    expect(decision.fallbackApplied).toBe(false)
+    expect(decision.threads.allocated).toBe(8)
+    expect(decision.threads.reason).toBe('multi_threaded_clamped')
+    expect(decision.memory.allowed).toBe(true)
+    expect(decision.concurrency.allowed).toBe(true)
+    expect(decision.summary).toContain('8 threads')
+    expect(decision.summary).toContain('0/1 active proofs')
+  })
+
+  it('preserves single-threaded fallback for non-isolated and memory-constrained browsers', () => {
+    const manager = createManager({ maxMemoryMB: 256 })
+
+    const nonIsolated = manager.getResourceAdmission({
+      crossOriginIsolated: false,
+      hardwareConcurrency: 8,
+      deviceMemoryGB: 8,
+    })
+    expect(nonIsolated.admitted).toBe(true)
+    expect(nonIsolated.executionMode).toBe('single-threaded-fallback')
+    expect(nonIsolated.fallbackApplied).toBe(true)
+    expect(nonIsolated.threads.allocated).toBe(1)
+    expect(nonIsolated.threads.reason).toBe('not_cross_origin_isolated')
+
+    const lowMemory = manager.getResourceAdmission({
+      crossOriginIsolated: true,
+      hardwareConcurrency: 8,
+      deviceMemoryGB: 2,
+    })
+    expect(lowMemory.admitted).toBe(true)
+    expect(lowMemory.executionMode).toBe('single-threaded-fallback')
+    expect(lowMemory.fallbackApplied).toBe(true)
+    expect(lowMemory.threads.allocated).toBe(1)
+    expect(lowMemory.threads.reason).toBe('constrained_device_memory')
+    expect(lowMemory.memory.constrained).toBe(true)
+
+    const singleCore = manager.getResourceAdmission({
+      crossOriginIsolated: true,
+      hardwareConcurrency: 1,
+      deviceMemoryGB: 8,
+    })
+    expect(singleCore.admitted).toBe(true)
+    expect(singleCore.executionMode).toBe('single-threaded-fallback')
+    expect(singleCore.fallbackApplied).toBe(true)
+    expect(singleCore.threads.reason).toBe('single_core_hardware')
+  })
+
+  it('rejects admission when memory budget or concurrency limit is exceeded', async () => {
+    vi.useFakeTimers()
+    const manager = createManager({ maxMemoryMB: 256 })
+    await manager.init()
+
+    const overMemory = manager.getResourceAdmission({
+      usage: { witnessBytes: PROOF_WORKER_MEMORY_LIMITS.maxWitnessBytes + 1 },
+      crossOriginIsolated: true,
+      hardwareConcurrency: 4,
+      deviceMemoryGB: 8,
+    })
+    expect(overMemory.admitted).toBe(false)
+    expect(overMemory.executionMode).toBe('rejected')
+    expect(overMemory.memory.reason).toBe('memory_budget_exceeded')
+
+    const pending = manager.verifyProof(EVIDENCE, PROOF, CONTRACT, 200)
+    const assertion = expect(pending).rejects.toThrow('Verification timed out')
+
+    const busy = manager.getResourceAdmission({
+      crossOriginIsolated: true,
+      hardwareConcurrency: 4,
+      deviceMemoryGB: 8,
+    })
+    expect(busy.admitted).toBe(false)
+    expect(busy.executionMode).toBe('rejected')
+    expect(busy.concurrency.allowed).toBe(false)
+    expect(busy.concurrency.activeProofs).toBe(1)
+    expect(busy.concurrency.reason).toBe('concurrency_limit_reached')
+
+    await vi.advanceTimersByTimeAsync(200)
+    await assertion
   })
 })

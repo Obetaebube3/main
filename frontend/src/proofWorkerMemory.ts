@@ -24,6 +24,31 @@ export type ProofWorkerMemoryUsage = {
   secretBytes?: number | null
 }
 
+export type ProofWorkerMemoryAdmissionReason =
+  | 'within_memory_budget'
+  | 'constrained_device_memory'
+  | 'memory_budget_exceeded'
+  | 'configured_memory_cap_exceeded'
+
+export type ProofWorkerMemoryAdmissionInput = {
+  usage?: ProofWorkerMemoryUsage
+  maxMemoryMB?: number
+  deviceMemoryGB?: number | null
+}
+
+export type ProofWorkerMemoryAdmission = {
+  allowed: boolean
+  constrained: boolean
+  reason: ProofWorkerMemoryAdmissionReason
+  requiredBytes: number
+  limitBytes: number
+  configuredLimitBytes: number | null
+  deviceMemoryGB: number | null
+  explanation: string
+}
+
+export const CONSTRAINED_DEVICE_MEMORY_GB = 2
+
 const manifestArtifacts = (browserArtifactManifest.artifacts ?? []) as BrowserArtifactEntry[]
 const publishedArtifactBytes = manifestArtifacts.reduce(
   (total, entry) => total + safeBytes(entry.raw_bytes),
@@ -99,6 +124,112 @@ export function assertProofWorkerMemoryBudget(usage: ProofWorkerMemoryUsage): vo
     Math.max(artifactBytes, publishedArtifactBytes)
   if (artifactBytes + witnessBytes + proofBytes + publicInputBytes + secretBytes > runtimeLimit) {
     failMemoryLimit()
+  }
+}
+
+function normalizeDeviceMemoryGB(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null
+  return value
+}
+
+export function evaluateProofWorkerMemoryAdmission(
+  input: ProofWorkerMemoryAdmissionInput = {},
+): ProofWorkerMemoryAdmission {
+  const usage = input.usage
+  const configuredLimitBytes =
+    typeof input.maxMemoryMB === 'number' && Number.isFinite(input.maxMemoryMB) && input.maxMemoryMB > 0
+      ? Math.floor(input.maxMemoryMB * 1024 * 1024)
+      : null
+  const deviceMemoryGB = normalizeDeviceMemoryGB(input.deviceMemoryGB)
+
+  let limitBytes = PROOF_WORKER_MEMORY_LIMITS.maxRuntimeBytes
+  let requiredBytes = PROOF_WORKER_MEMORY_LIMITS.maxRuntimeBytes
+
+  if (usage) {
+    try {
+      const artifactBytes = assertByteCount(
+        usage.artifactBytes,
+        PROOF_WORKER_MEMORY_LIMITS.maxArtifactBytes,
+      )
+      const witnessBytes = assertByteCount(
+        usage.witnessBytes,
+        PROOF_WORKER_MEMORY_LIMITS.maxWitnessBytes,
+      )
+      const proofBytes = assertByteCount(
+        usage.proofBytes,
+        PROOF_WORKER_MEMORY_LIMITS.maxProofBytes,
+      )
+      const publicInputLimitBytes = assertByteCount(
+        usage.publicInputLimitBytes ?? PROOF_WORKER_MEMORY_LIMITS.maxPublicInputBytes,
+        PROOF_WORKER_MEMORY_LIMITS.maxWitnessBytes,
+      )
+      const publicInputBytes = assertByteCount(
+        usage.publicInputBytes,
+        publicInputLimitBytes,
+      )
+      const secretBytes = assertByteCount(
+        usage.secretBytes,
+        PROOF_WORKER_MEMORY_LIMITS.maxWitnessBytes,
+      )
+      limitBytes =
+        PROOF_WORKER_MEMORY_LIMITS.maxWitnessBytes +
+        PROOF_WORKER_MEMORY_LIMITS.maxProofBytes +
+        publicInputLimitBytes +
+        Math.max(artifactBytes, publishedArtifactBytes)
+      const totalUsage = artifactBytes + witnessBytes + proofBytes + publicInputBytes + secretBytes
+      if (totalUsage > limitBytes) {
+        failMemoryLimit()
+      }
+      requiredBytes = totalUsage > 0 ? totalUsage : limitBytes
+    } catch {
+      return {
+        allowed: false,
+        constrained: true,
+        reason: 'memory_budget_exceeded',
+        requiredBytes,
+        limitBytes,
+        configuredLimitBytes,
+        deviceMemoryGB,
+        explanation: `Requested proof-worker memory exceeds the pinned runtime budget of ${limitBytes} bytes.`,
+      }
+    }
+  }
+
+  if (configuredLimitBytes !== null && requiredBytes > configuredLimitBytes) {
+    return {
+      allowed: false,
+      constrained: true,
+      reason: 'configured_memory_cap_exceeded',
+      requiredBytes,
+      limitBytes,
+      configuredLimitBytes,
+      deviceMemoryGB,
+      explanation: `Required proof-worker memory (${requiredBytes} bytes) exceeds the configured ${input.maxMemoryMB} MB cap (${configuredLimitBytes} bytes).`,
+    }
+  }
+
+  if (deviceMemoryGB !== null && deviceMemoryGB <= CONSTRAINED_DEVICE_MEMORY_GB) {
+    return {
+      allowed: true,
+      constrained: true,
+      reason: 'constrained_device_memory',
+      requiredBytes,
+      limitBytes,
+      configuredLimitBytes,
+      deviceMemoryGB,
+      explanation: `Device memory (${deviceMemoryGB} GB) is constrained; admitted within the ${limitBytes}-byte runtime budget with single-threaded fallback.`,
+    }
+  }
+
+  return {
+    allowed: true,
+    constrained: false,
+    reason: 'within_memory_budget',
+    requiredBytes,
+    limitBytes,
+    configuredLimitBytes,
+    deviceMemoryGB,
+    explanation: `Memory within pinned runtime budget (${requiredBytes} / ${limitBytes} bytes).`,
   }
 }
 

@@ -3,10 +3,12 @@ import benchLock from '../../zk/bench/bench.lock.json'
 import browserArtifactManifest from '../../zk/browser.artifacts.manifest.json'
 import { CircuitInputError } from './circuitInputSchema'
 import {
+  CONSTRAINED_DEVICE_MEMORY_GB,
   PROOF_WORKER_MEMORY_LIMITS,
   assertProofWorkerMemoryBudget,
   browserArtifactByteLimit,
   byteLengthOfProofWorkerValue,
+  evaluateProofWorkerMemoryAdmission,
   readBoundedCircuitArtifact,
 } from './proofWorkerMemory'
 
@@ -94,5 +96,39 @@ describe('proof worker memory limits', () => {
     await expect(
       readBoundedCircuitArtifact(response, '/noir/test.json', 64),
     ).rejects.toThrowError(new CircuitInputError('circuit_load_failed'))
+  })
+
+  it('evaluates memory admission decisions for normal, constrained, and over-budget cases', () => {
+    const admitted = evaluateProofWorkerMemoryAdmission({
+      maxMemoryMB: 256,
+      deviceMemoryGB: 8,
+    })
+    expect(admitted.allowed).toBe(true)
+    expect(admitted.constrained).toBe(false)
+    expect(admitted.reason).toBe('within_memory_budget')
+    expect(admitted.explanation).toContain('within pinned runtime budget')
+
+    const constrained = evaluateProofWorkerMemoryAdmission({
+      maxMemoryMB: 256,
+      deviceMemoryGB: CONSTRAINED_DEVICE_MEMORY_GB,
+    })
+    expect(constrained.allowed).toBe(true)
+    expect(constrained.constrained).toBe(true)
+    expect(constrained.reason).toBe('constrained_device_memory')
+    expect(constrained.explanation).toContain('single-threaded fallback')
+
+    const overBudget = evaluateProofWorkerMemoryAdmission({
+      usage: { witnessBytes: PROOF_WORKER_MEMORY_LIMITS.maxWitnessBytes + 1 },
+      maxMemoryMB: 256,
+    })
+    expect(overBudget.allowed).toBe(false)
+    expect(overBudget.reason).toBe('memory_budget_exceeded')
+
+    const overConfiguredCap = evaluateProofWorkerMemoryAdmission({
+      usage: { witnessBytes: 2 * 1024 * 1024 },
+      maxMemoryMB: 1,
+    })
+    expect(overConfiguredCap.allowed).toBe(false)
+    expect(overConfiguredCap.reason).toBe('configured_memory_cap_exceeded')
   })
 })

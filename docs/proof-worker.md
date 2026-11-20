@@ -129,6 +129,30 @@ Progress callbacks report only the current stage name (`loading_circuits`,
 values, secrets, or proof material. This is safe to log or surface in UI
 without risk of leaking sensitive data.
 
+## Resource admission decisions
+
+Before proving starts, callers can inspect memory, thread, and concurrency
+restrictions using `ProofWorkerManager.getResourceAdmission()` (backed by
+`evaluateProofWorkerMemoryAdmission()` in `src/proofWorkerMemory.ts`):
+
+- **Memory**: Checks requested or default runtime usage against
+  `PROOF_WORKER_MEMORY_LIMITS` and the configured `CSPPolicyConfig.maxMemoryMB`
+  cap. Rejects with `memory_budget_exceeded` or `configured_memory_cap_exceeded`
+  when over budget, and flags `constrained_device_memory` when reported device
+  memory is `<= 2 GB`.
+- **Threads & constrained-browser fallback**: Uses up to `min(hardwareConcurrency, 8)`
+  threads when `crossOriginIsolated` is true and memory is unconstrained.
+  Constrained browsers (non-isolated, low device memory, or single-core)
+  safely fall back to `single-threaded-fallback` (`1` thread) with an explicit
+  reason (`not_cross_origin_isolated`, `constrained_device_memory`, or
+  `single_core_hardware`).
+- **Concurrency**: Enforces the single-active-proof concurrency ceiling
+  (`1` active proof per manager by default), rejecting with
+  `concurrency_limit_reached` when a proof is already running.
+- **Privacy**: Admission decisions and `summary` strings only report byte
+  budgets, thread counts, concurrency counts, and reason codes — never witness
+  values, seeds, or proof material.
+
 ## Compatibility / migration
 
 - Proof / public-input encodings are unchanged (`noirClient.ts` remains the
