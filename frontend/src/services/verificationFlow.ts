@@ -2,10 +2,13 @@
  * verificationFlow — orchestrates the verification portal flow.
  *
  * Responsibility: combine the Flask extraction, NeonDB lookup, and the
- * Soroban on-chain registry into a single result. No React state.
+ * Soroban on-chain registry into a single structured result with independent
+ * trust dimensions, and bind cached verification results to their statement
+ * and trust snapshot identity so incompatible context changes require a fresh
+ * explicit verification result. No React state.
  */
 
-import type { ChainProofRecord } from '../stellarTypes'
+import type { ChainProofRecord, IssuerRecord } from '../stellarTypes'
 import type { ProofEvent } from '../types'
 import { assertValidVideoHash } from './videoHash'
 import {
@@ -92,9 +95,16 @@ export async function runVerificationFlow(
 
   const result: VerificationResult = {
     videoHash: safeHash,
-    hasHarpocratesMetadata: events.length > 0,
+    hasHarpocratesMetadata,
     events,
-    onChain: onChain,
+    onChain,
+    trust: buildVerificationDimensions({
+      hasHarpocratesMetadata,
+      events,
+      onChain,
+      issuerRecord: options.issuerRecord,
+      nowUnixSeconds: options.nowUnixSeconds,
+    }),
   }
   if (options.revision !== undefined) {
     result.revision = options.revision
@@ -117,5 +127,16 @@ export async function verifyUploadedVideo(
   const extract = await extractMetadata(file, options.signal)
   throwIfAborted(options.signal)
   const result = await runVerificationFlow(safeHash, options)
-  return { ...result, hasHarpocratesMetadata: extract.hasHarpocratesMetadata }
+  const hasHarpocratesMetadata = extract.hasHarpocratesMetadata
+  return {
+    ...result,
+    hasHarpocratesMetadata,
+    trust: buildVerificationDimensions({
+      hasHarpocratesMetadata,
+      events: result.events,
+      onChain: result.onChain,
+      issuerRecord: options.issuerRecord,
+      nowUnixSeconds: options.nowUnixSeconds,
+    }),
+  }
 }
