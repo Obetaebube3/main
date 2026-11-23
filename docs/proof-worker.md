@@ -48,6 +48,13 @@ Implementation:
 - Cancel / timeout / destroy / unmount all settle with a stable `CANCELLED`
   (or `TIMEOUT` / `CRASHED`) code whose message never contains witness values,
   seeds, proof hex, or media identifiers beyond stage names.
+- Proof-worker diagnostic messages forwarded to telemetry via
+  `boundProofWorkerDiagnostic` / `ProofWorkerManager.forwardDiagnosticToTelemetry`
+  redact witness-shaped values (witness/secret/proof/evidence fields, byte
+  buffers, bigints, witness arrays, hex and field-element tokens) and cap the
+  serialized UTF-8 payload at `PROOF_WORKER_MEMORY_LIMITS.maxDiagnosticBytes`
+  (4096 bytes by default) while retaining stable `stage` and `errorCode`/`code`
+  identifiers.
 
 ## State machine
 
@@ -181,6 +188,24 @@ invoked.
   terminated worker may still resolve/reject in the mock after termination,
   surfacing as a benign "unhandled rejection" in test output. This has been
   observed not to affect real-browser behavior (verified manually).
+
+## Offline worker capability report
+
+`ProofWorkerManager.getOfflineCapabilityReport()` (and standalone
+`buildOfflineWorkerCapabilityReport()` in `src/workers/proof-worker-manager.ts`)
+plus `inspectProofWorkerArtifactMetadata()` in `src/proofWorkerMemory.ts`
+produce a synchronous, offline readiness report:
+
+- Inspects required browser capabilities (`Worker`, `moduleWorkerType`,
+  `WebAssembly`, `SubtleCrypto`, `BigInt`, `ArrayBuffer`) via
+  `multiBrowserWorkerSupport.ts`.
+- Inspects configured proving artifact metadata and memory ceilings from the
+  statically bundled `zk/browser.artifacts.manifest.json` and
+  `zk/bench/bench.lock.json` without loading proving artifacts or contacting
+  network endpoints.
+- Fails closed (`ready: false`) with privacy-safe capability/metadata issue
+  descriptions when required browser features are missing or configured
+  artifact metadata is empty or exceeds worker/CSP limits.
 
 ## Multi-browser worker support
 
